@@ -1,4 +1,5 @@
-from typing import Dict, List
+from typing import Dict, Any
+
 import torch
 import numpy as np
 import h5py
@@ -20,7 +21,7 @@ from diffusion_policy.model.common.normalizer import LinearNormalizer, SingleFie
 from diffusion_policy.model.common.rotation_transformer import RotationTransformer
 from diffusion_policy.codecs.imagecodecs_numcodecs import register_codecs, Jpeg2k
 from diffusion_policy.common.replay_buffer import ReplayBuffer
-from diffusion_policy.common.sampler import SequenceSampler, get_val_mask
+from diffusion_policy.common.sampler import SequenceSampler, get_dataset_masks
 from diffusion_policy.common.normalize_util import (
     robomimic_abs_action_only_normalizer_from_stat,
     robomimic_abs_action_only_dual_arm_normalizer_from_stat,
@@ -29,6 +30,7 @@ from diffusion_policy.common.normalize_util import (
     get_identity_normalizer_from_stat,
     array_to_stats
 )
+
 register_codecs()
 
 class RobomimicReplayImageDataset(BaseImageDataset):
@@ -44,7 +46,9 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             use_legacy_normalizer=False,
             use_cache=False,
             seed=42,
-            val_ratio=0.0
+            val_ratio=0.0,
+            load_to_memory=False,
+            dataset_mask_kwargs: Dict[str, Any] = {}
         ):
         rotation_transformer = RotationTransformer(
             from_rep='axis_angle', to_rep=rotation_rep)
@@ -77,8 +81,9 @@ class RobomimicReplayImageDataset(BaseImageDataset):
                 else:
                     print('Loading cached ReplayBuffer from Disk.')
                     with zarr.ZipStore(cache_zarr_path, mode='r') as zip_store:
+                        store = None if load_to_memory else zarr.MemoryStore()
                         replay_buffer = ReplayBuffer.copy_from_store(
-                            src_store=zip_store, store=zarr.MemoryStore())
+                            src_store=zip_store, store=store)
                     print('Loaded!')
         else:
             replay_buffer = _convert_robomimic_to_replay(
@@ -107,11 +112,14 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             for key in rgb_keys + lowdim_keys:
                 key_first_k[key] = n_obs_steps
 
-        val_mask = get_val_mask(
-            n_episodes=replay_buffer.n_episodes, 
+        train_mask, val_mask, holdout_mask = get_dataset_masks(
+            dataset_path=dataset_path,
+            num_episodes=replay_buffer.n_episodes,
             val_ratio=val_ratio,
-            seed=seed)
-        train_mask = ~val_mask
+            seed=seed,
+            **dataset_mask_kwargs,
+        )
+        
         sampler = SequenceSampler(
             replay_buffer=replay_buffer, 
             sequence_length=horizon,
@@ -128,11 +136,19 @@ class RobomimicReplayImageDataset(BaseImageDataset):
         self.abs_action = abs_action
         self.n_obs_steps = n_obs_steps
         self.train_mask = train_mask
+        self.val_mask = val_mask
+        self.holdout_mask = holdout_mask
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
         self.use_legacy_normalizer = use_legacy_normalizer
+        self._dataset_path = dataset_path
+        self._dataset_mask_kwargs = dataset_mask_kwargs
 
+        # Visualization.
+        self._return_image = False
+        self._render_obs_key = None
+    
     def get_validation_dataset(self):
         val_set = copy.copy(self)
         val_set.sampler = SequenceSampler(
@@ -140,10 +156,22 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             sequence_length=self.horizon,
             pad_before=self.pad_before, 
             pad_after=self.pad_after,
-            episode_mask=~self.train_mask
+            episode_mask=self.val_mask
             )
-        val_set.train_mask = ~self.train_mask
+        val_set.train_mask = self.val_mask
         return val_set
+    
+    def get_holdout_dataset(self):
+        holdout_set = copy.copy(self)
+        holdout_set.sampler = SequenceSampler(
+            replay_buffer=self.replay_buffer, 
+            sequence_length=self.horizon,
+            pad_before=self.pad_before, 
+            pad_after=self.pad_after,
+            episode_mask=self.holdout_mask
+            )
+        holdout_set.train_mask = self.holdout_mask
+        return holdout_set
 
     def get_normalizer(self, **kwargs) -> LinearNormalizer:
         normalizer = LinearNormalizer()
@@ -208,7 +236,12 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             obs_dict[key] = np.moveaxis(data[key][T_slice],-1,1
                 ).astype(np.float32) / 255.
             # T,C,H,W
-            del data[key]
+
+            # Visualization.
+            if self._return_image and key == self._render_obs_key:
+                pass
+            else:
+                del data[key]
         for key in self.lowdim_keys:
             obs_dict[key] = data[key][T_slice].astype(np.float32)
             del data[key]
@@ -217,6 +250,12 @@ class RobomimicReplayImageDataset(BaseImageDataset):
             'obs': dict_apply(obs_dict, torch.from_numpy),
             'action': torch.from_numpy(data['action'].astype(np.float32))
         }
+
+        if self._return_image:
+            assert isinstance(self._render_obs_key, str), "render obs key is not a string!"
+            torch_data['img'] = data[self._render_obs_key][T_slice].astype(np.uint8)
+            del data[self._render_obs_key]
+
         return torch_data
 
 
@@ -299,9 +338,9 @@ def _convert_robomimic_to_replay(store, shape_meta, dataset_path, abs_action, ro
                     abs_action=abs_action,
                     rotation_transformer=rotation_transformer
                 )
-                assert this_data.shape == (n_steps,) + tuple(shape_meta['action']['shape'])
+                assert this_data.shape == (n_steps,) + tuple(shape_meta['action']['shape']), f"this_data.shape {this_data.shape} is not the same as {(n_steps,) + tuple(shape_meta['action']['shape'])}"
             else:
-                assert this_data.shape == (n_steps,) + tuple(shape_meta['obs'][key]['shape'])
+                assert this_data.shape == (n_steps,) + tuple(shape_meta['obs'][key]['shape']), f"this_data.shape {this_data.shape} is not the same as {(n_steps,) + tuple(shape_meta['obs'][key]['shape'])}"
             _ = data_group.array(
                 name=key,
                 data=this_data,

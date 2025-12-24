@@ -143,6 +143,7 @@ class SharedMemoryQueue:
         write_count = self.write_counter.load()
         read_count = self.read_counter.load()
         n_data = write_count - read_count
+
         if n_data <= 0:
             raise Empty()
 

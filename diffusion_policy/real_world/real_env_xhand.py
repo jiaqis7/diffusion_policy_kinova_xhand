@@ -8,7 +8,7 @@ import time
 import shutil
 import math
 from multiprocessing.managers import SharedMemoryManager
-from diffusion_policy.real_world.utils.kinova_bimanual_with_robotiq_gripper import KinovaBimanualWithGripper
+from diffusion_policy.real_world.utils.kinova_bimanual_with_xhand import KinovaBimanualWithXhand
 # from diffusion_policy.real_world.multi_zed import MultiZed, SingleZed
 from diffusion_policy.real_world.video_recorder import VideoRecorder
 from diffusion_policy.common.timestamp_accumulator import (
@@ -26,17 +26,17 @@ DEFAULT_OBS_KEY_MAP = {
     # robot
     "robot1_eef_pos": "robot1_eef_pos",
     "robot1_eef_quat": "robot1_eef_quat",
-    "robot1_gripper_qpos": "robot1_gripper_qpos",
+    "robot1_xhand_qpos": "robot1_xhand_qpos",
     "robot2_eef_pos": "robot2_eef_pos",
     "robot2_eef_quat": "robot2_eef_quat",
-    "robot2_gripper_qpos": "robot2_gripper_qpos",
+    "robot2_xhand_qpos": "robot2_xhand_qpos",
 
     # timestamps
     'step_idx': 'step_idx',
     'timestamp': 'timestamp'
 }
 
-class RealEnv:
+class RealXhandEnv:
     def __init__(self, 
             # required params
             output_dir,
@@ -97,14 +97,27 @@ class RealEnv:
         )
         print(f"[Real Env] creating image transform with input shape {video_capture_resolution_square} and output shape {obs_image_resolution}")
 
-        color_tf = get_image_transform(
-            input_res=video_capture_resolution_square,
-            output_res=obs_image_resolution, 
-            # obs output rgb
-            bgr_to_rgb=True)
-        color_transform = color_tf
+        # color_tf = get_image_transform(
+        #     input_res=video_capture_resolution_square,
+        #     output_res=obs_image_resolution, 
+        #     # obs output rgb
+        #     bgr_to_rgb=True)
+        # color_transform = color_tf
+        # if obs_float32:
+        #     color_transform = lambda x: color_tf(x).astype(np.float32) / 255
+
         if obs_float32:
+            # old behavior: resize + RGB + /255
+            color_tf = get_image_transform(
+                input_res=video_capture_resolution_square,
+                output_res=obs_image_resolution,
+                bgr_to_rgb=True,
+            )
             color_transform = lambda x: color_tf(x).astype(np.float32) / 255
+        else:
+            # raw mode: don't touch
+            def color_transform(x):
+                return x
 
 
         def transform(data):
@@ -156,7 +169,7 @@ class RealEnv:
         self.multi_cam_vis = None
 
 
-        robot = KinovaBimanualWithGripper(
+        robot = KinovaBimanualWithXhand(
             shm_manager=shm_manager,
             frequency=30,
             launch_timeout=30,
@@ -210,12 +223,6 @@ class RealEnv:
         if wait:
             self.stop_wait()
 
-    # def start_wait(self):
-    #     self.zed.start_wait()
-    #     self.robot.start_wait()
-    #     if self.multi_cam_vis is not None:
-    #         self.multi_cam_vis.start_wait()
-
 
     def start_wait(self):
         import time
@@ -245,7 +252,7 @@ class RealEnv:
 
     def stop_wait(self):
         self.robot.stop_wait()
-        # 如果 ZedWorker 实现了 stop_wait 就用，否则 join
+
         if hasattr(self.zed, "stop_wait"):
             self.zed.stop_wait()
         else:
@@ -302,6 +309,9 @@ class RealEnv:
         obs_data = dict(camera_obs)
         obs_data.update(robot_obs)
         obs_data['timestamp'] = obs_align_timestamps
+        # print(obs_data.keys())
+        # print(obs_data['robot2_xhand_qpos'])
+        # print("done!!")
         return obs_data
 
     
@@ -327,7 +337,7 @@ class RealEnv:
         print(f"[exec_actions] Received {len(actions)} actions with shape {actions.shape}")
         
         # Validate action dimension
-        assert actions.shape[-1] == 16, \
+        assert actions.shape[-1] == 38, \
             f"Expected 16D bimanual actions [pos1(3),quat1(4),gripper1(1),pos2(3),quat2(4),gripper2(1)], got {actions.shape[-1]}D"
 
 

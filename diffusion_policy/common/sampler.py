@@ -1,6 +1,12 @@
-from typing import Optional
-import numpy as np
+from typing import Optional, Tuple, Union
+
+import yaml
+import h5py
 import numba
+import pathlib
+import numpy as np
+from collections import defaultdict
+
 from diffusion_policy.common.replay_buffer import ReplayBuffer
 
 
@@ -47,7 +53,7 @@ def create_indices(
     return indices
 
 
-def get_val_mask(n_episodes, val_ratio, seed=0):
+def get_val_mask(n_episodes: int, val_ratio: float, seed: int = 0) -> np.ndarray:
     val_mask = np.zeros(n_episodes, dtype=bool)
     if val_ratio <= 0:
         return val_mask
@@ -60,7 +66,7 @@ def get_val_mask(n_episodes, val_ratio, seed=0):
     return val_mask
 
 
-def downsample_mask(mask, max_n, seed=0):
+def downsample_mask(mask: np.ndarray, max_n: int, seed: int = 0) -> np.ndarray:
     # subsample training data
     train_mask = mask
     if (max_n is not None) and (np.sum(train_mask) > max_n):
@@ -73,6 +79,243 @@ def downsample_mask(mask, max_n, seed=0):
         train_mask[train_idxs] = True
         assert np.sum(train_mask) == n_train
     return train_mask
+
+
+def filter_training_episodes(
+    train_mask: np.ndarray,
+    filter_ratio: float,
+    curation_config: pathlib.Path,
+    curation_method: str,
+    seed: int,
+) -> np.ndarray:
+    """Filter training data by curation method."""
+    if filter_ratio <= 0.0:
+        return train_mask
+    
+    # Load curation config.
+    with open(curation_config, "+r") as f:
+        config = yaml.safe_load(f)
+    
+    # Filter training episodes.
+    num_filter = int(train_mask.sum() * filter_ratio)
+    filter_idxs = np.array(config[curation_method][seed])
+    assert np.all(train_mask[filter_idxs]), "Indexing non-training data."
+    train_mask[filter_idxs[:num_filter]] = False
+
+    return train_mask
+
+
+def select_holdout_episodes(
+    train_mask: np.ndarray,
+    holdout_mask: np.ndarray,
+    select_ratio: float,
+    curation_config: pathlib.Path,
+    curation_method: str,
+    seed: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Select training data by curation method."""
+    if select_ratio <= 0.0:
+        return train_mask, holdout_mask
+
+    # Load curation config.
+    with open(curation_config, "+r") as f:
+        config = yaml.safe_load(f)
+
+    # Select holdout episodes.
+    num_select = int(holdout_mask.sum() * select_ratio)
+    select_idxs = np.array(config[curation_method][seed])
+    assert np.all(holdout_mask[select_idxs]), "Indexing non-holdout data."
+    assert not np.any(train_mask[select_idxs]), "Indexing training data."
+    holdout_mask[select_idxs[:num_select]] = False
+    train_mask[select_idxs[:num_select]] = True
+    
+    return train_mask, holdout_mask
+    
+
+# TODO: The next iteration of experiments should swap the order in which
+# validation demos and holdout demos are sampled. We want a sliding window
+# between selected training and holdout demonstrations, without validation
+# demos being sampled in-between. This should drastically simplify experiments
+# (i.e., we can have one 'all demos' policy) and result in a more consistent,
+# experiment protocol, whereby the filtering and selection experiments will be
+# deciding the same demos (and quantity of them, i.e., the x-axis of the plots)
+# for filtering and selection. While not doing the above certainly does not 
+# invalidate the current result set, pairing the above with training policies 
+# based on step count instead of epochs will be a better camera-ready result.
+def get_dataset_masks(
+    dataset_path: Union[str, pathlib.Path],
+    num_episodes: int,
+    val_ratio: float,
+    max_train_episodes: Optional[int] = None,
+    train_ratio: Optional[float] = None,
+    uniform_quality: bool = False,
+    curate_dataset: bool = False,
+    curation_config_dir: Optional[str] = None,
+    curation_method: Optional[str] = None,
+    filter_ratio: Optional[float] = None,
+    select_ratio: Optional[float] = None,
+    seed: int = 0,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return training, validation, and holdout masks."""
+    assert not (max_train_episodes is not None and train_ratio is not None), \
+    "One or neither of max_train_episodes or train_ratio should be specified."
+
+    # Dataset splits.
+    if max_train_episodes is not None:
+        num_train = max_train_episodes
+        num_val = int(num_episodes * val_ratio)
+        num_holdout = num_episodes - num_train - num_val
+    else:
+        train_ratio = 1.0 - val_ratio if train_ratio is None else train_ratio
+        num_train = int(num_episodes * train_ratio)
+        num_val = int(num_episodes * val_ratio)
+        num_holdout = num_episodes - num_train - num_val
+
+    assert_str =f"num_train ({num_train}) + num_val ({num_val}) + num_holdout ({num_holdout}) != num_episodes ({num_episodes})"
+    assert num_train + num_val + num_holdout == num_episodes, assert_str
+
+    # Dataset info.
+    dataset_path = pathlib.Path(dataset_path)
+    dataset_name = dataset_path.parts[1]
+    if dataset_name in ["robomimic", "hardware"]:
+        task_name = dataset_path.parts[-3]
+        task_type = dataset_path.parts[-2]
+    elif dataset_name == "pusht":
+        task_name = dataset_name
+        task_type = "ph"
+    elif dataset_path.parts[2] == "eval_save_episodes":
+        task_name = ""
+        task_type = "ph"
+    elif dataset_path.parts[2] == "eval_save_episodes_real":
+        task_name = ""
+        task_type = "ph_real"
+    else:
+        # raise ValueError(f"Unsupported dataset {dataset_name}.")
+        dataset_name = "custom"
+        task_name = ""
+        task_type = "ph"
+    
+    if task_type == "ph_real":
+        # Samples in consecutive order (from evaluation).
+        train_mask = np.zeros(num_episodes, dtype=bool)
+        train_mask[:num_train] = True
+        val_mask = np.zeros(num_episodes, dtype=bool)
+        val_mask[num_train:num_train+num_val] = True
+        holdout_mask = ~np.logical_or(train_mask, val_mask)
+
+    elif task_type == "ph" or not uniform_quality:
+        # i.i.d. sampling across all quality tiers.
+        val_mask = get_val_mask(num_episodes, val_ratio, seed=seed)        
+        train_mask = ~val_mask
+        if max_train_episodes is not None:
+            train_mask = downsample_mask(train_mask, max_train_episodes, seed=seed)
+        else:
+            train_mask = downsample_mask(train_mask, num_train, seed=seed)
+        holdout_mask = ~np.logical_or(train_mask, val_mask)
+
+    elif task_type == "mh" and uniform_quality:
+        # i.i.d. sampling within quality tiers.
+        assert max_train_episodes is None, "Does not support max_train_episodes."
+        if dataset_name == "robomimic":
+            with h5py.File(dataset_path) as file:
+                if any(x in task_name for x in ["lift", "can", "square"]):
+                    demo_quality_sets = ["worse", "okay", "better"]
+                elif "transport" in task_name:
+                    demo_quality_sets = ["worse", "worse_okay", "okay", "okay_better", "better", "worse_better"]
+                else:
+                    raise ValueError(f"Task {task_name} is not of type {task_type}.")
+                decode_fn = lambda x: np.array(
+                    [int(name.decode().split("_")[-1]) for name in x]
+                )
+                demo_quality_idxs = [decode_fn(file["mask"][s][:]) for s in demo_quality_sets]
+        
+        elif dataset_name == "hardware":
+            if task_name == "figure8_v3":
+                demo_quality_sets = ["0", "1", "2"]
+            elif task_name in ["figure8_v4", "bookshelf_v2", "bookshelf_v3"]:
+                demo_quality_sets = ["0", "1", "2", "3"]
+            elif any(x in task_name for x in ["figure8", "tuckbox", "bookshelf"]):
+                demo_quality_sets = ["0", "1"]
+            else:
+                raise ValueError(f"Task {task_name} is not of type {task_type}.")
+            
+            quality_to_episode_idx = defaultdict(list)
+            for episode_path in sorted((dataset_path.parent / "episodes").iterdir()):
+                if episode_path.is_dir():
+                    with open(episode_path / "quality.txt", "r") as file:
+                        quality_label = file.read().strip()
+                        assert quality_label in demo_quality_sets, f"Unexpected quality label: {quality_label}"
+                    quality_to_episode_idx[quality_label].append(int(episode_path.stem))
+            demo_quality_idxs = [np.array(quality_to_episode_idx[s]) for s in demo_quality_sets]
+            
+        # Dataset masks.
+        train_mask = np.zeros(num_episodes, dtype=bool)
+        val_mask = np.zeros(num_episodes, dtype=bool)
+        holdout_mask = np.zeros(num_episodes, dtype=bool)
+
+        # Samples per quality tier (accounts for quality sets of varying sizes).
+        demo_quality_counts = np.array([len(idxs) for idxs in demo_quality_idxs], dtype=float)
+        demo_quality_ratios = demo_quality_counts / demo_quality_counts.sum()
+        num_samples_per_set = defaultdict(list)
+        for i, quality_label in enumerate(demo_quality_sets):
+            for k in [num_train, num_val, num_holdout]:
+                num_samples_per_set[quality_label].append(round(k * demo_quality_ratios[i]))
+
+        rng = np.random.default_rng(seed=seed)
+        for idxs, quality_label in zip(demo_quality_idxs, demo_quality_sets):
+            shuffle_idxs = idxs.copy()
+            rng.shuffle(shuffle_idxs)
+            start_idx = 0
+            for split_mask, split_size in zip(
+                [train_mask, val_mask, holdout_mask], 
+                num_samples_per_set[quality_label],
+            ):
+                end_idx = start_idx + split_size
+                split_mask[shuffle_idxs[start_idx:end_idx]] = True
+                start_idx = end_idx
+    else: 
+        raise ValueError(f"Unsupport task type {task_type}.")
+
+    # Assert no remainder demos.
+    assert (
+        train_mask.sum() == num_train and
+        val_mask.sum() == num_val and
+        holdout_mask.sum() == num_holdout and
+        not np.logical_and(train_mask, val_mask).any() and
+        not np.logical_and(train_mask, holdout_mask).any() and
+        not np.logical_and(val_mask, holdout_mask).any()
+    ), "Remainder demos!"
+
+    # Dataset curation.
+    if curate_dataset:
+        assert (
+            (curation_config_dir is not None) and
+            (curation_method is not None) and
+            (filter_ratio is not None and 0.0 <= filter_ratio <= 1.0) and
+            (select_ratio is not None and 0.0 <= select_ratio <= 1.0)
+        ), "Curation arguments must be set together"
+
+        # Filter episodes from training data.
+        train_mask = filter_training_episodes(
+            train_mask=train_mask,
+            filter_ratio=filter_ratio,
+            curation_config=pathlib.Path(curation_config_dir) / "train_config.yaml",
+            curation_method=curation_method,
+            seed=seed,
+        )
+
+        # Select episodes from holdout data.
+        train_mask, holdout_mask = select_holdout_episodes(
+            train_mask=train_mask,
+            holdout_mask=holdout_mask,
+            select_ratio=select_ratio,
+            curation_config=pathlib.Path(curation_config_dir) / "holdout_config.yaml",
+            curation_method=curation_method,
+            seed=seed,
+        )
+
+    return train_mask, val_mask, holdout_mask
+
 
 class SequenceSampler:
     def __init__(self, 

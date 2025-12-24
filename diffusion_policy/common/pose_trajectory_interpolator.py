@@ -4,6 +4,9 @@ import numpy as np
 import scipy.interpolate as si
 import scipy.spatial.transform as st
 
+######################################################
+########## Needs to confirm wxyz and xyzw ############
+
 def rotation_distance(a: st.Rotation, b: st.Rotation) -> float:
     return (b * a.inv()).magnitude()
 
@@ -12,11 +15,12 @@ def pose_distance(start_pose, end_pose):
     end_pose = np.array(end_pose)
     start_pos = start_pose[:3]
     end_pos = end_pose[:3]
-    start_rot = st.Rotation.from_rotvec(start_pose[3:])
-    end_rot = st.Rotation.from_rotvec(end_pose[3:])
+    start_rot = st.Rotation.from_quat(start_pose[3:7])
+    end_rot = st.Rotation.from_quat(end_pose[3:7])
     pos_dist = np.linalg.norm(end_pos - start_pos)
     rot_dist = rotation_distance(start_rot, end_rot)
-    return pos_dist, rot_dist
+    grp_dist = np.linalg.norm(end_pose[7:] - start_pose[7:])
+    return pos_dist, rot_dist, grp_dist
 
 class PoseTrajectoryInterpolator:
     def __init__(self, times: np.ndarray, poses: np.ndarray):
@@ -37,11 +41,14 @@ class PoseTrajectoryInterpolator:
             assert np.all(times[1:] >= times[:-1])
 
             pos = poses[:,:3]
-            rot = st.Rotation.from_rotvec(poses[:,3:])
+            rot = st.Rotation.from_quat(poses[:,3:7])
+            grp = poses[:,7:]
 
             self.pos_interp = si.interp1d(times, pos, 
                 axis=0, assume_sorted=True)
             self.rot_interp = st.Slerp(times, rot)
+            self.grp_interp = si.interp1d(times, grp, 
+                axis=0, assume_sorted=True)
     
     @property
     def times(self) -> np.ndarray:
@@ -56,9 +63,10 @@ class PoseTrajectoryInterpolator:
             return self._poses
         else:
             n = len(self.times)
-            poses = np.zeros((n, 6))
+            poses = np.zeros((n, 8))
             poses[:,:3] = self.pos_interp.y
-            poses[:,3:] = self.rot_interp(self.times).as_rotvec()
+            poses[:,3:7] = self.rot_interp(self.times).as_quat()
+            poses[:,7:] = self.grp_interp.y
             return poses
 
     def trim(self, 
@@ -78,16 +86,18 @@ class PoseTrajectoryInterpolator:
     def drive_to_waypoint(self, 
             pose, time, curr_time,
             max_pos_speed=np.inf, 
-            max_rot_speed=np.inf
+            max_rot_speed=np.inf,
+            max_grp_speed=np.inf
         ) -> "PoseTrajectoryInterpolator":
         assert(max_pos_speed > 0)
         assert(max_rot_speed > 0)
         time = max(time, curr_time)
         
         curr_pose = self(curr_time)
-        pos_dist, rot_dist = pose_distance(curr_pose, pose)
+        pos_dist, rot_dist, grp_dist = pose_distance(curr_pose, pose)
         pos_min_duration = pos_dist / max_pos_speed
         rot_min_duration = rot_dist / max_rot_speed
+        grp_min_duration = grp_dist / max_grp_speed
         duration = time - curr_time
         duration = max(duration, max(pos_min_duration, rot_min_duration))
         assert duration >= 0
@@ -106,6 +116,7 @@ class PoseTrajectoryInterpolator:
             pose, time, 
             max_pos_speed=np.inf, 
             max_rot_speed=np.inf,
+            max_grp_speed=np.inf,
             curr_time=None,
             last_waypoint_time=None
         ) -> "PoseTrajectoryInterpolator":
@@ -169,9 +180,10 @@ class PoseTrajectoryInterpolator:
         # determine speed
         duration = time - end_time
         end_pose = trimmed_interp(end_time)
-        pos_dist, rot_dist = pose_distance(pose, end_pose)
+        pos_dist, rot_dist, grp_dist = pose_distance(pose, end_pose)
         pos_min_duration = pos_dist / max_pos_speed
         rot_min_duration = rot_dist / max_rot_speed
+        grp_min_duration = grp_dist / max_grp_speed
         duration = max(duration, max(pos_min_duration, rot_min_duration))
         assert duration >= 0
         last_waypoint_time = end_time + duration
@@ -191,7 +203,7 @@ class PoseTrajectoryInterpolator:
             is_single = True
             t = np.array([t])
         
-        pose = np.zeros((len(t), 6))
+        pose = np.zeros((len(t), 8))
         if self.single_step:
             pose[:] = self._poses[0]
         else:
@@ -199,9 +211,10 @@ class PoseTrajectoryInterpolator:
             end_time = self.times[-1]
             t = np.clip(t, start_time, end_time)
 
-            pose = np.zeros((len(t), 6))
+            pose = np.zeros((len(t), 8))
             pose[:,:3] = self.pos_interp(t)
-            pose[:,3:] = self.rot_interp(t).as_rotvec()
+            pose[:,3:7] = self.rot_interp(t).as_quat()
+            pose[:,7:] = self.grp_interp(t)
 
         if is_single:
             pose = pose[0]

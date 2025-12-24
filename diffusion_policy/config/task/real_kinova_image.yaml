@@ -1,0 +1,45 @@
+# task/real_kinova_image.yaml
+
+name: real_kinova_image
+abs_action: true
+
+dataset:
+  _target_: diffusion_policy.dataset.real_kinova_image_dataset.RealKinovaImageDataset
+  dataset_path: /home/hshadow/wild_human/data/testing_10_15.zarr
+  horizon: 16
+  n_obs_steps: 2
+  n_action_steps: 16
+  pad_before: 1
+  pad_after: 7
+  seed: 42
+  val_ratio: 0.05          
+  abs_action: true
+  shape_meta: ${task.shape_meta} 
+  
+  
+
+
+env_runner:
+  _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
+
+
+shape_meta:
+  action:
+    shape: [16]
+  obs:
+    agentview_image:
+      shape: [3, 256, 256]
+      type: rgb
+    robot1_eef_pos:
+      shape: [3]
+    robot1_eef_quat:
+      shape: [4]
+    robot1_gripper_qpos:
+      shape: [1]
+    robot2_eef_pos:
+      shape: [3]
+    robot2_eef_quat:
+      shape: [4]
+    robot2_gripper_qpos:
+      shape: [1]
+

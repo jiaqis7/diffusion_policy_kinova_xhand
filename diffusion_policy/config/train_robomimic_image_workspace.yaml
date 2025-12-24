@@ -1,17 +1,17 @@
 defaults:
   - _self_
-  - task: lift_image
+  - task: real_kinova_xhand_image
 
 name: train_robomimic_image
 _target_: diffusion_policy.workspace.train_robomimic_image_workspace.TrainRobomimicImageWorkspace
 
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
-exp_name: "default"
+exp_name: "xhand_bc"
 
-horizon: &horizon 10
-n_obs_steps: 1
-n_action_steps: 1
+horizon: &horizon ${task.dataset.horizon}
+n_obs_steps: ${task.dataset.n_obs_steps}
+n_action_steps: ${task.dataset.n_action_steps}
 n_latency_steps: 0
 dataset_obs_steps: *horizon
 past_action_visible: False

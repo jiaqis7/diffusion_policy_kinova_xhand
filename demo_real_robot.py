@@ -145,7 +145,7 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
                 drot = st.Rotation.from_euler('xyz', drot_xyz)
                 target_pose[:3] += dpos
                 target_pose[3:] = (drot * st.Rotation.from_rotvec(
-                    target_pose[3:])).as_rotvec()
+                target_pose[3:])).as_rotvec()
 
                 # execute teleop command
                 env.exec_actions(

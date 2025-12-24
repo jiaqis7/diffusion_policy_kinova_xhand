@@ -3,17 +3,17 @@ import multiprocessing as mp
 import numpy as np
 import cv2
 from threadpoolctl import threadpool_limits
-from diffusion_policy.real_world.multi_realsense import MultiRealsense
+from diffusion_policy.real_world.multi_zed import MultiZed
 
 class MultiCameraVisualizer(mp.Process):
     def __init__(self,
-        realsense: MultiRealsense,
-        row, col,
-        window_name='Multi Cam Vis',
-        vis_fps=60,
-        fill_value=0,
-        rgb_to_bgr=True
-        ):
+                 zed: MultiZed,
+                 row, col,
+                 window_name='Multi Cam Vis',
+                 vis_fps=60,
+                 fill_value=0,
+                 rgb_to_bgr=True
+                 ):
         super().__init__()
         self.row = row
         self.col = col
@@ -21,7 +21,7 @@ class MultiCameraVisualizer(mp.Process):
         self.vis_fps = vis_fps
         self.fill_value = fill_value
         self.rgb_to_bgr=rgb_to_bgr
-        self.realsense = realsense
+        self.zed = zed
         # shared variables
         self.stop_event = mp.Event()
 
@@ -49,7 +49,7 @@ class MultiCameraVisualizer(mp.Process):
         vis_data = None
         vis_img = None
         while not self.stop_event.is_set():
-            vis_data = self.realsense.get_vis(out=vis_data)
+            vis_data = self.zed.get_vis(out=vis_data)
             color = vis_data['color']
             N, H, W, C = color.shape
             assert C == 3
