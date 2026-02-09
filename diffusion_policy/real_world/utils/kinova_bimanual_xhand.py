@@ -39,6 +39,10 @@ class KinovaBimanualXhand:
         self.key_xhand_pos_right = f"kinova::bot2::xhand_position"
         self.key_xhand_pos_des_right = f"kinova::bot2::xhand_position_des"
 
+        # Joint control keys
+        self.key_kinova_q_des_direct_left = f"kinova::bot1::q_des_direct"
+        self.key_kinova_q_des_direct_right = f"kinova::bot2::q_des_direct"
+
         self.redis_pipe = _redis.pipeline()
         self.ee_home_pos1 = np.array([-0.02, -0.65, 0.18])
         self.ee_home_quat_wxyz1 = np.array([0.7071, 0.7071, 0.0, 0.0])
@@ -56,12 +60,17 @@ class KinovaBimanualXhand:
                                         0.0, 0.0     ])
         
 
-        self.xhand_home_pos2 = np.array([0.0, 0.0, 0.0, 
-                                        0.0, 0.0, 0.0, 
-                                        0.0, 0.0, 
-                                        0.0, 0.0, 
+        self.xhand_home_pos2 = np.array([0.0, 0.0, 0.0,
+                                        0.0, 0.0, 0.0,
+                                        0.0, 0.0,
+                                        0.0, 0.0,
                                         0.0, 0.0     ])
-        
+
+        # Joint angle home positions (stored in radians, sent as degrees to robot)
+        # Robot1 degrees: {121.0, 52.0, -170.0, -114.0, -58.0, -62.0, -179.0}
+        self.joint_home_q1 = np.array([2.1118, 0.9076, -2.9671, -1.9897, -1.0123, -1.0821, -3.1241])
+        # Robot2 degrees: {-90.0, 51.0, 125.0, -110.0, 50.0, -60.0, 16.0}
+        self.joint_home_q2 = np.array([-1.5708, 0.8901, 2.1817, -1.9199, 0.8727, -1.0472, 0.2793])
 
 ######################################################
 ####################### Gripper ########################
@@ -240,6 +249,68 @@ class KinovaBimanualXhand:
         # print(xhand2)
 
         return pos1, quat_wxyz1, xhand1, q1, pos2, quat_wxyz2, xhand2, q2
+
+
+######################################################
+##################### Joint Control ##################
+######################################################
+
+    def goto_joint_xhand(self, q_des1, xhand_des1, q_des2, xhand_des2):
+        """
+        Joint angle control for both arms with xhand.
+
+        Args:
+            q_des1: 7D joint angles for robot1 (in radians)
+            xhand_des1: 12D xhand positions for robot1 (in radians)
+            q_des2: 7D joint angles for robot2 (in radians)
+            xhand_des2: 12D xhand positions for robot2 (in radians)
+
+        Note:
+            - Arm joint angles are converted from radians to degrees before sending
+            - Xhand positions are sent as radians (no conversion)
+        """
+        # Convert arm joint angles: radians -> degrees
+        q_des1_deg = np.rad2deg(q_des1)
+        q_des2_deg = np.rad2deg(q_des2)
+
+        # Send to Redis: arm in degrees, xhand in radians
+        self.redis_pipe.set(self.key_kinova_q_des_direct_left, encode_matlab(q_des1_deg))
+        self.redis_pipe.set(self.key_xhand_pos_des_left, encode_matlab(xhand_des1))  # radians
+        self.redis_pipe.set(self.key_kinova_q_des_direct_right, encode_matlab(q_des2_deg))
+        self.redis_pipe.set(self.key_xhand_pos_des_right, encode_matlab(xhand_des2))  # radians
+        self.redis_pipe.execute()
+
+    def get_joint_xhand(self):
+        """
+        Get joint angles and xhand positions for both arms.
+
+        Returns:
+            q1: 7D joint angles for robot1 (in radians)
+            xhand1: 12D xhand positions for robot1 (in radians)
+            q2: 7D joint angles for robot2 (in radians)
+            xhand2: 12D xhand positions for robot2 (in radians)
+
+        Note:
+            - Arm joint angles are converted from degrees to radians
+            - Xhand positions are already in radians (no conversion)
+        """
+        self.redis_pipe.get(self.key_kinova_q_left)
+        self.redis_pipe.get(self.key_xhand_pos_left)
+        self.redis_pipe.get(self.key_kinova_q_right)
+        self.redis_pipe.get(self.key_xhand_pos_right)
+        b_q1, b_xhand1, b_q2, b_xhand2 = self.redis_pipe.execute()
+
+        # Decode from Redis
+        q1_deg = decode_matlab(b_q1)
+        xhand1 = decode_matlab(b_xhand1)  # already in radians
+        q2_deg = decode_matlab(b_q2)
+        xhand2 = decode_matlab(b_xhand2)  # already in radians
+
+        # Convert arm joint angles: degrees -> radians
+        q1 = np.deg2rad(q1_deg)
+        q2 = np.deg2rad(q2_deg)
+
+        return q1, xhand1, q2, xhand2
 
 
 if __name__ == "__main__":

@@ -44,7 +44,8 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 @click.option('--frequency', '-f', default=30, type=float, help="Control frequency in Hz")
 @click.option('--max_duration', '-md', default=30, type=float, help='Max duration per episode in seconds')
 @click.option('--num_episodes', '-n', default=1, type=int, help='Number of episodes to collect')
-def main(input, output, robot_ip, frequency, max_duration, num_episodes):
+@click.option('--control_mode', '-cm', default='ee', type=click.Choice(['ee', 'joint']), help="Control mode: 'ee' for end-effector pose, 'joint' for joint angles")
+def main(input, output, robot_ip, frequency, max_duration, num_episodes, control_mode):
     
     # ===================== Load Policy =====================
     print(f"Loading checkpoint from {input}")
@@ -100,6 +101,7 @@ def main(input, output, robot_ip, frequency, max_duration, num_episodes):
             robot_ip=robot_ip,
             frequency=frequency,
             n_obs_steps=n_obs_steps,
+            control_mode=control_mode,
             obs_image_resolution=obs_res,
             obs_float32=False,
             enable_multi_cam_vis=True,
@@ -229,34 +231,51 @@ def main(input, output, robot_ip, frequency, max_duration, num_episodes):
                             actions = actions[is_future]
                             action_timestamps = action_timestamps[is_future]
                         
-                        # Optional: Clip workspace (adjust bounds for your robot!)
-                        
+                        # -------- Clip workspace and prepare actions --------
+                        if control_mode == 'joint':
+                            # Joint control mode
+                            print("[eval] Predicted actions (joint mode):")
+                            print(f"  Shape: {actions.shape}")
+                            print(f"  Arm2 joints: {actions[0, 0:7]}")
+                            print(f"  Arm2 xhand: {actions[0, 7:19]}")
 
-                        print("[eval] Predicted actions:")
-                        print(f"  Shape: {actions.shape}")
-                        print(f"  Arm2 pos: {actions[0, 0:3]}")
-                        print(f"  Arm2 quat: {actions[0, 3:7]}")
-                        print(f"  Arm2 xhand: {actions[0, 7:19]}")
+                            # Clip joint angles (safety limits for Kinova Gen3)
+                            q_min = np.array([-3.14, -2.41, -3.14, -2.66, -3.14, -2.23, -3.14], dtype=np.float32)
+                            q_max = np.array([3.14, 2.41, 3.14, 2.66, 3.14, 2.23, 3.14], dtype=np.float32)
+                            actions[:, 0:7] = np.clip(actions[:, 0:7], q_min, q_max)
 
+                            # Fixed robot1 home position (joint angles in radians)
+                            # Degrees: {121.0, 52.0, -170.0, -114.0, -58.0, -62.0, -179.0}
+                            robot1_home = np.array([
+                                # 7 joint angles for robot1 (radians)
+                                2.1118, 0.9076, -2.9671, -1.9897, -1.0123, -1.0821, -3.1241,
+                                # 12 xhand joints (all zeros = home)
+                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+                            ], dtype=np.float32)  # 19D total
+                        else:
+                            # EE pose control mode
+                            print("[eval] Predicted actions (EE pose mode):")
+                            print(f"  Shape: {actions.shape}")
+                            print(f"  Arm2 pos: {actions[0, 0:3]}")
+                            print(f"  Arm2 quat: {actions[0, 3:7]}")
+                            print(f"  Arm2 xhand: {actions[0, 7:19]}")
 
-                        
+                            # Clip workspace position
+                            pos_min = np.array([0.02, 0.6, 0.05], dtype=np.float32)
+                            pos_max = np.array([0.1, 0.7, 0.2], dtype=np.float32)
+                            actions[:, 0:3] = np.clip(actions[:, 0:3], pos_min, pos_max)
+
+                            # Fixed robot1 home position (EE pose)
+                            robot1_home = np.array([
+                                -0.02, -0.65, 0.18,  # position
+                                0.7071, 0.7071, 0.0, 0.0,  # quaternion
+                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # xhand
+                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+                            ], dtype=np.float32)  # 19D total
+
                         # -------- Execute Actions --------
-
-                        print("[eval] about to call env.exec_actions", flush=True)
-
-
-                        pos_min = np.array([0.02, 0.6, 0.05], dtype=np.float32)
-                        pos_max = np.array([ 0.1, 0.7, 0.2], dtype=np.float32)
-                        actions[:, 0:3] = np.clip(actions[:, 0:3], pos_min, pos_max)
-
-
-                        # fixed robot1
-                        robot1_home = np.array([
-                            -0.02, -0.65, 0.18,
-                            0.7071, 0.7071, 0.0, 0.0,
-                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-                        ], dtype=np.float32)
+                        print(f"[eval] Sending {len(actions)} actions to robot", flush=True)
 
                         robot1_block = np.tile(robot1_home, (actions.shape[0], 1))
                         actions_full = np.concatenate([robot1_block, actions], axis=1)

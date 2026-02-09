@@ -22,28 +22,44 @@ from diffusion_policy.common.cv2_util import (
     get_image_transform, optimal_row_cols)
 from diffusion_policy.real_world.zed_worker import ZedWorker
 
-DEFAULT_OBS_KEY_MAP = {
-    # robot
+# Observation key map for end-effector control mode
+DEFAULT_OBS_KEY_MAP_EE = {
+    # robot EE pose
     "robot1_eef_pos": "robot1_eef_pos",
     "robot1_eef_quat": "robot1_eef_quat",
     "robot1_xhand_qpos": "robot1_xhand_qpos",
     "robot2_eef_pos": "robot2_eef_pos",
     "robot2_eef_quat": "robot2_eef_quat",
     "robot2_xhand_qpos": "robot2_xhand_qpos",
-
     # timestamps
     'step_idx': 'step_idx',
     'timestamp': 'timestamp'
 }
 
+# Observation key map for joint control mode
+DEFAULT_OBS_KEY_MAP_JOINT = {
+    # robot joint positions
+    "robot1_joint_qpos": "robot1_joint_qpos",
+    "robot1_xhand_qpos": "robot1_xhand_qpos",
+    "robot2_joint_qpos": "robot2_joint_qpos",
+    "robot2_xhand_qpos": "robot2_xhand_qpos",
+    # timestamps
+    'step_idx': 'step_idx',
+    'timestamp': 'timestamp'
+}
+
+# Default for backwards compatibility
+DEFAULT_OBS_KEY_MAP = DEFAULT_OBS_KEY_MAP_EE
+
 class RealXhandEnv:
-    def __init__(self, 
+    def __init__(self,
             # required params
             output_dir,
             robot_ip=None,
             # env params
             frequency=30,
             n_obs_steps=2,
+            control_mode='ee',
             # obs
             obs_image_resolution=(640,480),
             max_obs_buffer_size=30,
@@ -158,10 +174,10 @@ class RealXhandEnv:
 
         self.zed = ZedWorker(
             shm_manager=self.shm_manager,
-            out_key="agentview_image",      
-            square_size=self.obs_image_resolution[0], 
-            resolution="HD720",              
-            depth_mode="NONE",               
+            out_key="agentview_image",
+            output_size=self.obs_image_resolution,  # (H, W) - supports non-square
+            resolution="HD720",
+            depth_mode="NONE",
             fps=30,
             verbose=False
         )
@@ -177,6 +193,7 @@ class RealXhandEnv:
             get_max_k=max_obs_buffer_size,
             host=robot_ip,
             password="iprl",
+            control_mode=control_mode,
         )
 
 
@@ -187,7 +204,12 @@ class RealXhandEnv:
         self.max_obs_buffer_size = max_obs_buffer_size
         self.max_pos_speed = max_pos_speed
         self.max_rot_speed = max_rot_speed
-        self.obs_key_map = obs_key_map
+        # Select obs_key_map based on control_mode if using default
+        if obs_key_map is DEFAULT_OBS_KEY_MAP:
+            self.obs_key_map = DEFAULT_OBS_KEY_MAP_JOINT if control_mode == 'joint' else DEFAULT_OBS_KEY_MAP_EE
+        else:
+            self.obs_key_map = obs_key_map
+        self.control_mode = control_mode
         # recording
         self.output_dir = output_dir
         self.video_dir = video_dir
@@ -316,11 +338,23 @@ class RealXhandEnv:
 
     
 
-    def exec_actions(self, 
-            actions: np.ndarray, 
-            timestamps: np.ndarray, 
-            stages: Optional[np.ndarray]=None):
-        
+    def exec_actions(self,
+            actions: np.ndarray,
+            timestamps: np.ndarray,
+            stages: Optional[np.ndarray]=None,
+            robot1_home: Optional[np.ndarray]=None):
+        """
+        Execute actions on the robot.
+
+        Args:
+            actions: Action array, either:
+                - [H, 38] for bimanual control (robot1[19] + robot2[19])
+                - [H, 19] for single-arm control (robot2 only, robot1 uses home position)
+            timestamps: [H] array of target timestamps
+            stages: Optional [H] array of stage indices
+            robot1_home: Optional [19] home position for robot1 when using 19D actions.
+                        If None, uses default home position.
+        """
         print("[env.exec_actions] module file:", __file__, flush=True)
 
         assert self.is_ready
@@ -333,12 +367,24 @@ class RealXhandEnv:
         elif not isinstance(stages, np.ndarray):
             stages = np.array(stages, dtype=np.int64)
 
-
         print(f"[exec_actions] Received {len(actions)} actions with shape {actions.shape}")
-        
+
+        # Handle 19D single-arm actions by padding with robot1_home
+        if actions.shape[-1] == 19:
+            if robot1_home is None:
+                # Default robot1 home position (joint mode)
+                # Degrees: {121.0, 52.0, -170.0, -114.0, -58.0, -62.0, -179.0}
+                robot1_home = np.array([
+                    2.1118, 0.9076, -2.9671, -1.9897, -1.0123, -1.0821, -3.1241,  # arm joints
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0   # xhand
+                ], dtype=np.float64)
+            robot1_block = np.tile(robot1_home, (actions.shape[0], 1))
+            actions = np.concatenate([robot1_block, actions], axis=-1)
+            print(f"[exec_actions] Expanded 19D -> 38D actions (robot1 at home)")
+
         # Validate action dimension
         assert actions.shape[-1] == 38, \
-            f"Expected 16D bimanual actions [pos1(3),quat1(4),gripper1(1),pos2(3),quat2(4),gripper2(1)], got {actions.shape[-1]}D"
+            f"Expected 38D bimanual actions or 19D single-arm actions, got {actions.shape[-1]}D"
 
 
         # convert action to pose

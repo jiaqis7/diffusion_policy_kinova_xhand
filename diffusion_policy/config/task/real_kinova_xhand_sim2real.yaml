@@ -1,0 +1,40 @@
+# Configuration for deploying simulation-trained policy to real Kinova+XHand robot
+# This config matches the DDDC Benchmark simulation training format
+
+name: real_kinova_xhand_sim2real
+abs_action: true
+
+# Shape meta matching the SIMULATION POLICY's expectations
+# The sim2real adapter will transform real robot observations to match these keys
+shape_meta:
+  action:
+    shape: [19]  # Single arm: 7 arm joints + 12 xhand joints
+  obs:
+    head_cam:  # Sim policy expects this key name (mapped from agentview_image)
+      shape: [3, 256, 256]  # CHW format, 256x256 square
+      type: rgb
+    agent_pos:  # Sim policy expects concatenated proprioception
+      shape: [19]  # robot2_joint_qpos[7] + robot2_xhand_qpos[12]
+      type: low_dim
+
+# Policy parameters (should match sim training config)
+n_obs_steps: 3
+n_action_steps: 4
+horizon: 8
+
+# Dataset config (for reference, not used in eval)
+dataset:
+  _target_: diffusion_policy.dataset.real_kinova_xhand_image_dataset.RealKinovaXhandImageDataset
+  horizon: ${horizon}
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  pad_before: 2
+  pad_after: 5
+  seed: 42
+  val_ratio: 0.05
+  abs_action: true
+  shape_meta: ${task.shape_meta}
+
+# Environment runner (placeholder)
+env_runner:
+  _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner

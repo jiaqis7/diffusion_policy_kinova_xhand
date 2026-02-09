@@ -1,20 +1,50 @@
 # diffusion_policy/real_world/zed_worker.py
-import os, time
-import numpy as np
-from diffusion_policy.common.cv2_util import get_image_transform
+"""
+ZED Camera Worker for real-time image capture.
+
+Runs as a separate process and streams images to SharedMemoryRingBuffer.
+Supports arbitrary output resolutions (non-square) for policies trained
+with specific aspect ratios.
+"""
+import os
+import time
 import multiprocessing as mp
-import pyzed.sl as sl
-from diffusion_policy.shared_memory.shared_memory_ring_buffer import SharedMemoryRingBuffer
+
+import numpy as np
+
 from diffusion_policy.common.cv2_util import get_image_transform
-from wild_human.utils.zed_utils import init_zed 
+from diffusion_policy.shared_memory.shared_memory_ring_buffer import SharedMemoryRingBuffer
 
 class ZedWorker(mp.Process):
     def __init__(self, shm_manager, out_key="agentview_image",
-                 square_size=256, resolution="HD720", depth_mode="NONE",
+                 square_size=256, output_size=None, resolution="HD720", depth_mode="NONE",
                  fps=30, launch_timeout=10.0, verbose=False):
+        """
+        Initialize ZED camera worker.
+
+        Args:
+            shm_manager: SharedMemoryManager for creating ring buffer
+            out_key: Key name for the image in the shared memory dict
+            square_size: (Deprecated) Square output size. Use output_size instead.
+            output_size: (height, width) tuple for output resolution.
+                         Supports non-square aspect ratios (e.g., (368, 640)).
+                         If None, falls back to square_size.
+            resolution: ZED camera resolution ("HD720", "HD1080", etc.)
+            depth_mode: ZED depth mode ("NONE", "PERFORMANCE", etc.)
+            fps: Target frames per second
+            launch_timeout: Timeout for camera initialization (unused)
+            verbose: Enable verbose logging (unused)
+        """
         super().__init__(name="ZEDWorker")
         self.out_key = out_key
-        self.square_size = square_size
+
+        # Support both square_size (legacy) and output_size (new)
+        if output_size is not None:
+            self.output_height, self.output_width = output_size
+        else:
+            self.output_height = square_size
+            self.output_width = square_size
+
         self.resolution = resolution
         self.depth_mode = depth_mode
         self.fps = int(fps)
@@ -23,7 +53,7 @@ class ZedWorker(mp.Process):
         self.stop_event = mp.Event()
 
         example = {
-            out_key: np.zeros((square_size, square_size, 3), np.uint8),
+            out_key: np.zeros((self.output_height, self.output_width, 3), np.uint8),
             "timestamp": time.time(),
             "camera_capture_timestamp": 0.0,
             "camera_receive_timestamp": 0.0,
@@ -46,20 +76,17 @@ class ZedWorker(mp.Process):
 
 
     def run(self):
-
-        import os, time
-        import numpy as np
-        from diffusion_policy.common.cv2_util import get_image_transform
-
-
+        # Ensure ZED SDK libraries are in path (required in subprocess)
         ld = os.environ.get("LD_LIBRARY_PATH", "")
         os.environ["LD_LIBRARY_PATH"] = "/usr/local/zed/lib:/usr/local/cuda/lib64:" + ld
 
         import pyzed.sl as sl
+
+        # Initialize camera parameters
         init = sl.InitParameters()
-        init.camera_resolution = sl.RESOLUTION.HD720
-        init.camera_fps = int(self.fps)
-        init.depth_mode = sl.DEPTH_MODE.NONE
+        init.camera_resolution = getattr(sl.RESOLUTION, self.resolution, sl.RESOLUTION.HD720)
+        init.camera_fps = self.fps
+        init.depth_mode = getattr(sl.DEPTH_MODE, self.depth_mode, sl.DEPTH_MODE.NONE)
 
         try:
             init.sdk_verbose = 0  
@@ -75,24 +102,25 @@ class ZedWorker(mp.Process):
         cam = sl.Camera()
         status = cam.open(init)
         if status != sl.ERROR_CODE.SUCCESS:
-            print(f"[ZEDWorker] open failed: {status}")
-
-            # self.ready_event.set()
+            print(f"[ZEDWorker] Camera open failed: {status}")
             return
 
-  
+        # Get camera resolution info
         info = cam.get_camera_information()
         W = info.camera_configuration.calibration_parameters.left_cam.image_size.width
         H = info.camera_configuration.calibration_parameters.left_cam.image_size.height
         mat_left = sl.Mat(W, H, sl.MAT_TYPE.U8_C4)
 
-        tf = get_image_transform(
-            input_res=(W, H),                     
-            output_res=(self.square_size, self.square_size),
-            bgr_to_rgb=False                          
+        print(f"[ZedWorker] Camera input: {W}x{H} -> Output: {self.output_width}x{self.output_height}")
+
+        # Create image transform (handles resize and crop with aspect ratio preservation)
+        transform = get_image_transform(
+            input_res=(W, H),
+            output_res=(self.output_width, self.output_height),
+            bgr_to_rgb=False
         )
 
-        first_deadline = time.time() + 5.0 
+        first_deadline = time.time() + 5.0
         iter_idx = 0
 
         try:
@@ -106,9 +134,9 @@ class ZedWorker(mp.Process):
                     continue
 
                 cam.retrieve_image(mat_left, sl.VIEW.LEFT, sl.MEM.CPU)
-                bgr = mat_left.get_data()[:, :, :3]       
-                rgb = bgr[..., ::-1]                       # BGR → RGB
-                rgb_sq = tf(rgb).astype(np.uint8)       
+                bgr = mat_left.get_data()[:, :, :3]
+                rgb = bgr[..., ::-1]  # BGR → RGB
+                rgb_out = transform(rgb).astype(np.uint8)       
 
                 t_recv = time.time()
                 try:
@@ -117,7 +145,7 @@ class ZedWorker(mp.Process):
                     t_cap = t_recv
 
                 self.ring.put({
-                    self.out_key: rgb_sq,              
+                    self.out_key: rgb_out,
                     "timestamp": t_recv,
                     "camera_capture_timestamp": t_cap,
                     "camera_receive_timestamp": t_recv
