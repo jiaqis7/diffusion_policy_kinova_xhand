@@ -301,9 +301,9 @@ class RealXhandEnv:
         last_robot_data = self.robot.get_all_state()
 
 
-        dt = 1 / self.frequency
+        obs_dt = 1 / self.video_capture_fps  # always 1/30s to match training fps
         last_timestamp = cam['timestamp'][-1]
-        obs_align_timestamps = last_timestamp - (np.arange(self.n_obs_steps)[::-1] * dt)
+        obs_align_timestamps = last_timestamp - (np.arange(self.n_obs_steps)[::-1] * obs_dt)
 
 
         this_timestamps = cam['timestamp']
@@ -317,10 +317,12 @@ class RealXhandEnv:
         }
 
         robot_timestamps = last_robot_data['robot_receive_timestamp']
+        print(f"[get_obs] robot_timestamps range: [{robot_timestamps[0]:.3f}, {robot_timestamps[-1]:.3f}], obs_align: [{obs_align_timestamps[0]:.3f}, {obs_align_timestamps[-1]:.3f}]", flush=True)
         r_idxs = []
         for t in obs_align_timestamps:
             before = np.nonzero(robot_timestamps < t)[0]
             r_idxs.append(before[-1] if len(before) > 0 else 0)
+        print(f"[get_obs] r_idxs={r_idxs}", flush=True)
 
         robot_obs_raw = {self.obs_key_map[k]: v for k, v in last_robot_data.items() if k in self.obs_key_map}
         robot_obs = {k: v[r_idxs] for k, v in robot_obs_raw.items()}
@@ -395,6 +397,7 @@ class RealXhandEnv:
         new_stages = stages[is_new]
 
         # schedule waypoints
+        print(f"[exec_actions] Scheduling {len(new_actions)}/{len(actions)} waypoints (filtered by timestamp)")
         for i in range(len(new_actions)):
             self.robot.schedule_waypoint(
                 pose=new_actions[i],

@@ -317,11 +317,15 @@ def main(input, output, robot_ip, frequency, max_duration, num_episodes, n_obs_s
                             hand_joints_real = agent_pos[:, 7:19]  # [T, 12] in real order
 
                             # Reorder hand joints from real to sim (alphabetically sorted)
-                            # Real order:  [Thumb_rot, Thumb_MCP, Thumb_PIP, Index_abd, Index_MCP, Index_PIP,
-                            #               Middle_MCP, Middle_PIP, Ring_MCP, Ring_PIP, Pinky_MCP, Pinky_PIP]
-                            # Sim order:   [index_bend, index_j1, index_j2, mid_j1, mid_j2, pinky_j1, pinky_j2,
-                            #               ring_j1, ring_j2, thumb_bend, thumb_rota1, thumb_rota2]
-                            REAL_TO_SIM_HAND = [3, 4, 5, 6, 7, 10, 11, 8, 9, 1, 0, 2]
+                            # Real order (0-11):  [Thumb_rot, Thumb_MCP, Thumb_PIP, Index_abd, Index_MCP, Index_PIP,
+                            #                      Middle_MCP, Middle_PIP, Ring_MCP, Ring_PIP, Pinky_MCP, Pinky_PIP]
+                            # Sim order (0-11):   [index_bend, index_j1, index_j2, mid_j1, mid_j2, pinky_j1, pinky_j2,
+                            #                      ring_j1, ring_j2, thumb_bend, thumb_rota1, thumb_rota2]
+                            # Mapping: sim[i] = real[REAL_TO_SIM_HAND[i]]
+                            #   sim[9] (thumb_bend)  <- real[0] (Thumb_rot)
+                            #   sim[10] (thumb_rota1) <- real[1] (Thumb_MCP)
+                            #   sim[11] (thumb_rota2) <- real[2] (Thumb_PIP)
+                            REAL_TO_SIM_HAND = [3, 4, 5, 6, 7, 10, 11, 8, 9, 0, 1, 2]
                             hand_joints = hand_joints_real[:, REAL_TO_SIM_HAND]  # [T, 12] in sim order
 
                             # Adjust arm joint angles for sim-to-real offset
@@ -380,6 +384,15 @@ def main(input, output, robot_ip, frequency, max_duration, num_episodes, n_obs_s
                                         print(f"  {key}: {type(val)}")
                                 print()
 
+                            # Log agent_pos right before policy inference (first iteration only)
+                            if iter_idx == 0:
+                                agent_pos_tensor = obs_dict['agent_pos'][0]  # (n_obs_steps, 20)
+                                agent_pos_np = agent_pos_tensor.cpu().numpy()
+                                print(f"[DEBUG] agent_pos sent to policy (shape: {agent_pos_np.shape}):")
+                                for t_idx in range(agent_pos_np.shape[0]):
+                                    print(f"  t={t_idx}: {agent_pos_np[t_idx]}")
+                                print()
+
                             result = policy.predict_action(obs_dict)
                             sim_actions = result['action'][0].detach().cpu().numpy()
 
@@ -399,11 +412,15 @@ def main(input, output, robot_ip, frequency, max_duration, num_episodes, n_obs_s
                             hand_actions_sim = sim_actions[:, 8:20]  # [H, 12] in sim order
 
                             # Reorder hand actions from sim to real order (inverse of REAL_TO_SIM_HAND)
-                            # Sim order:  [index_bend, index_j1, index_j2, mid_j1, mid_j2, pinky_j1, pinky_j2,
-                            #              ring_j1, ring_j2, thumb_bend, thumb_rota1, thumb_rota2]
-                            # Real order: [Thumb_rot, Thumb_MCP, Thumb_PIP, Index_abd, Index_MCP, Index_PIP,
-                            #              Middle_MCP, Middle_PIP, Ring_MCP, Ring_PIP, Pinky_MCP, Pinky_PIP]
-                            SIM_TO_REAL_HAND = [10, 9, 11, 0, 1, 2, 3, 4, 7, 8, 5, 6]
+                            # Sim order (0-11):  [index_bend, index_j1, index_j2, mid_j1, mid_j2, pinky_j1, pinky_j2,
+                            #                     ring_j1, ring_j2, thumb_bend, thumb_rota1, thumb_rota2]
+                            # Real order (0-11): [Thumb_rot, Thumb_MCP, Thumb_PIP, Index_abd, Index_MCP, Index_PIP,
+                            #                     Middle_MCP, Middle_PIP, Ring_MCP, Ring_PIP, Pinky_MCP, Pinky_PIP]
+                            # Mapping: real[i] = sim[SIM_TO_REAL_HAND[i]]
+                            #   real[0] (Thumb_rot)  <- sim[9] (thumb_bend)
+                            #   real[1] (Thumb_MCP)  <- sim[10] (thumb_rota1)
+                            #   real[2] (Thumb_PIP)  <- sim[11] (thumb_rota2)
+                            SIM_TO_REAL_HAND = [9, 10, 11, 0, 1, 2, 3, 4, 7, 8, 5, 6]
                             hand_actions = hand_actions_sim[:, SIM_TO_REAL_HAND]  # [H, 12] in real order
 
                             actions = np.concatenate([arm_actions, hand_actions], axis=-1)  # [H, 19]

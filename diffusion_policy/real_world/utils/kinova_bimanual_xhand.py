@@ -53,14 +53,14 @@ class KinovaBimanualXhand:
         self.gripper_home_pos2 = np.array([0])
 
 
-        self.xhand_home_pos1 = np.array([0.0, 0.0, 0.0, 
+        self.xhand_home_pos1 = np.array([1.8, 0.0, 0.5, 
                                         0.0, 0.0, 0.0, 
                                         0.0, 0.0, 
                                         0.0, 0.0, 
                                         0.0, 0.0     ])
         
 
-        self.xhand_home_pos2 = np.array([0.0, 0.0, 0.0,
+        self.xhand_home_pos2 = np.array([1.8, 0.0, 0.5,
                                         0.0, 0.0, 0.0,
                                         0.0, 0.0,
                                         0.0, 0.0,

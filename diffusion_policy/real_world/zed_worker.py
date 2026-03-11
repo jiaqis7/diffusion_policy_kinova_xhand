@@ -105,6 +105,10 @@ class ZedWorker(mp.Process):
             print(f"[ZEDWorker] Camera open failed: {status}")
             return
 
+        # Set exposure: -1 = auto, 0-100 = manual
+        cam.set_camera_settings(sl.VIDEO_SETTINGS.EXPOSURE, 20)
+        cam.set_camera_settings(sl.VIDEO_SETTINGS.GAIN, 30)
+
         # Get camera resolution info
         info = cam.get_camera_information()
         W = info.camera_configuration.calibration_parameters.left_cam.image_size.width
